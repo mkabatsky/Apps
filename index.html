@@ -79,7 +79,7 @@
 
 <div id="tabs" role="tablist" aria-label="Apps">
   <span class="spacer" id="tabSpacer"></span>
-  <span id="buildTag" title="Build 2 - October 8, 2026">Build 2</span>
+  <span id="buildTag" title="Build 3 - October 8, 2026">Build 3</span>
   <button type="button" class="strip-btn" id="reloadBtn" title="Reload this tab" aria-label="Reload this tab">
     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
   </button>
@@ -95,18 +95,30 @@
   // Nothing in the apps themselves is changed: each still works at its own
   // address. If a repository is ever renamed, its path here is the one thing
   // to change. light / dark = that app's own page colour, used for its tab.
+  // login = that app's sign-in form, so this page can tell a tab is still
+  // waiting for a sign-in that has since been made in another tab.
   var APPS = [
-    {id: "database", name: "Database", short: "Database", path: "/Database/", light: "#f2f4f7", dark: "#12161b"},
-    {id: "install", name: "Install Tracker", short: "Install", path: "/Install-Tracker/", light: "#f4f1e9", dark: "#12161d"},
-    {id: "field", name: "Field Engineering", short: "Field Eng", path: "/FE/", light: "#f2f4f7", dark: "#12161b"}
+    {id: "database", name: "Database", short: "Database", path: "/Database/", light: "#f2f4f7", dark: "#12161b", login: "#cloudLogin"},
+    {id: "install", name: "Install Tracker", short: "Install", path: "/Install-Tracker/", light: "#f4f1e9", dark: "#12161d", login: "#itLogin"},
+    {id: "field", name: "Field Engineering", short: "Field Eng", path: "/FE/", light: "#e2efea", dark: "#0d1a17", login: "#login"}
   ];
-  // Which tabs an account type gets (the Database's account types). Any type
-  // not listed here gets every tab. This only decides what is SHOWN: each app
-  // still enforces its own rules about who may open it.
+  // Which tabs an account type gets (the Database's account types, as set in
+  // its Manage users). Any type not listed here gets every tab. The first one
+  // named is the tab that type opens on. This only decides what is SHOWN: each
+  // app still enforces its own rules about who may open it.
   var TABS_FOR_ROLE = {
     driver: ["database"],                 // drivers: their deliveries page, full-screen, no tab strip
-    dashboard: ["database", "install"]    // dashboard-view logins have no Field Engineering access
+    dashboard: ["database", "install"],   // dashboard-view logins have no Field Engineering access
+    fe: ["field", "install"],             // FE and FE Viewer have nothing in the Database
+    fe_viewer: ["field", "install"]
   };
+  // PC-FE, FE and FE Viewer are a marker (fe_kind) on top of the Database's
+  // role: a PC-FE is a PC underneath, an FE and an FE Viewer are Viewers.
+  var FE_KIND_ROLE = {pc_fe: "tech", fe: "viewer", fe_viewer: "viewer"};
+  function accountType(row){
+    var r = String((row && row.role) || "staff"), k = String((row && row.fe_kind) || "");
+    return k && FE_KIND_ROLE[k] === r ? k : r;
+  }
   var K = {tab: "apps.tab", role: "apps.role"};
 
   function $(id){ return document.getElementById(id); }
@@ -137,9 +149,39 @@
   }
   function observe(){
     var s = currentSession(), uid = s ? s.uid : null;
-    if (uid !== lastUid){ lastUid = uid; epoch++; }
+    if (uid !== lastUid){
+      var fromNobody = !lastUid;
+      lastUid = uid; epoch++;
+      // Someone has just signed in (in one of the tabs, or in another window).
+      // Any tab still sitting on its sign-in form is loaded again, so one
+      // sign-in is all it takes. Looked at twice, a moment apart: the tab that
+      // did the signing in needs that moment to put its own form away.
+      if (uid){
+        var at = epoch;
+        setTimeout(function(){ catchUpTabs(at, false); }, 1200);
+        // by the second look, a tab that is not on its sign-in form has caught
+        // up by itself, so it needn't be loaded again when it is next clicked
+        // (only when nobody was signed in before - otherwise it might still be
+        // showing the previous person, and loading it again is the safe thing)
+        setTimeout(function(){ catchUpTabs(at, fromNobody); }, 3500);
+      }
+    }
     refreshRole(s);
     return s;
+  }
+  function showsSignIn(app){
+    try{
+      var el = app.frame && app.login && app.frame.contentDocument && app.frame.contentDocument.querySelector(app.login);
+      return !!el && !el.hidden;
+    }catch(e){ return false; }
+  }
+  function catchUpTabs(at, settle){
+    if (!lastUid || epoch !== at) return;   // the sign-in has changed again since: that change has its own look
+    var ok = allowedIds();
+    APPS.forEach(function(a){
+      if (!a.frame || ok.indexOf(a.id) === -1) return;
+      if (showsSignIn(a)) open(a); else if (settle) a.epoch = epoch;
+    });
   }
 
   // ---------- the account type, for which tabs to show ----------
@@ -169,15 +211,20 @@
     roleAsked = s.token; roleRetryAt = 0;
     configReady.then(function(c){
       if (!c) return null;
-      return fetch(String(c.url).replace(/\/+$/, "") + "/rest/v1/eq_profiles?select=role&id=eq." + encodeURIComponent(s.uid),
-          {headers: {apikey: c.anonKey, Authorization: "Bearer " + s.token, Accept: "application/json"}, cache: "no-store"})
-        .then(function(r){
+      function ask(columns){
+        return fetch(String(c.url).replace(/\/+$/, "") + "/rest/v1/eq_profiles?select=" + columns + "&id=eq." + encodeURIComponent(s.uid),
+          {headers: {apikey: c.anonKey, Authorization: "Bearer " + s.token, Accept: "application/json"}, cache: "no-store"});
+      }
+      return ask("role,fe_kind").then(function(r){
+          // a database from before the PC-FE / FE / FE Viewer types has no such column: ask the old way
+          return r.status === 400 ? ask("role") : r;
+        }).then(function(r){
           if (r.status === 401) return null;   // the sign-in has just expired: the open app renews it, and that asks again
           if (!r.ok) throw new Error("status " + r.status);
           return r.json();
         })
         // a login with no line in that table is treated as full access, as the apps treat it
-        .then(function(rows){ return Array.isArray(rows) ? String((rows[0] && rows[0].role) || "staff") : null; });
+        .then(function(rows){ return Array.isArray(rows) ? accountType(rows[0]) : null; });
     }).then(function(found){
       if (!found || lastUid !== s.uid) return;   // couldn't tell (offline, sign-in just expired): keep what is showing
       known = {uid: s.uid, role: found};
