@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#1a3a6b">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-title" content="Apps">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Apps</title>
+<style>
+  :root{
+    color-scheme: light dark;
+    --strip:#1a3a6b; --strip-ink:#d5dfef; --tab-hover:rgba(255,255,255,.13);
+    --page:#f2f4f7; --ink:#1a2530; --ink-muted:#64707c; --surface:#ffffff; --border:#d6dce3; --accent:#b8720f; --accent-ink:#ffffff;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --strip:#0b0f14; --strip-ink:#a9b5c2; --tab-hover:rgba(255,255,255,.09);
+      --page:#12161b; --ink:#e7eaee; --ink-muted:#96a2ad; --surface:#1b2129; --border:#333e4a; --accent:#e0a032; --accent-ink:#171207;
+    }
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;height:100%;overflow:hidden;}
+  body{display:flex;flex-direction:column;height:100vh;height:100dvh;background:var(--strip);color:var(--ink);
+    font-family:"Segoe UI",system-ui,-apple-system,Roboto,sans-serif;font-size:14px;line-height:1.45;}
+  [hidden]{display:none !important;}
+
+  /* ---- the tab strip ---- */
+  #tabs{flex:0 0 auto;display:flex;align-items:flex-end;gap:2px;background:var(--strip);
+    padding:6px calc(8px + env(safe-area-inset-right)) 0 calc(8px + env(safe-area-inset-left));
+    padding-top:calc(6px + env(safe-area-inset-top));}
+  .tab{font:inherit;font-size:13px;font-weight:600;color:var(--strip-ink);background:transparent;border:0;
+    border-radius:9px 9px 0 0;padding:9px 20px 10px;min-height:38px;min-width:0;max-width:240px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;}
+  .tab:hover{background:var(--tab-hover);}
+  /* the open tab takes the colour of the app under it, so the two read as one piece */
+  .tab[aria-selected="true"]{background:var(--l);color:#1a2530;cursor:default;}
+  @media (prefers-color-scheme: dark){ .tab[aria-selected="true"]{background:var(--d);color:#e7eaee;} }
+  .tab:focus-visible, .strip-btn:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;}
+  .tab .short{display:none;}
+  .spacer{flex:1 1 auto;}
+  #buildTag{align-self:center;margin:0 6px 4px;font-size:11px;color:var(--strip-ink);opacity:.7;white-space:nowrap;}
+  .strip-btn{align-self:center;margin-bottom:4px;display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;
+    border:0;border-radius:8px;background:transparent;color:var(--strip-ink);cursor:pointer;}
+  .strip-btn:hover{background:var(--tab-hover);}
+  /* a login with only one app gets that app full-screen, exactly as it looks on its own */
+  body.single #tabs{display:none;}
+  /* fingers need a bigger target than a mouse does */
+  @media (pointer:coarse){
+    .tab{min-height:44px;font-size:14px;padding-top:11px;padding-bottom:12px;}
+    .strip-btn{width:40px;height:40px;}
+  }
+  @media (max-width:560px){
+    #tabs{padding-left:calc(4px + env(safe-area-inset-left));padding-right:calc(4px + env(safe-area-inset-right));}
+    .tab{flex:1 1 0;padding:10px 6px;min-height:44px;text-align:center;}
+    .tab .long{display:none;} .tab .short{display:inline;}
+    #buildTag{display:none;}
+  }
+
+  /* ---- one pane per app, stacked; only the open one shows. Kept in place (not
+     removed) so each app holds its width and its place while another is open. ---- */
+  #panes{flex:1 1 auto;position:relative;min-height:0;background:var(--page);}
+  .pane{position:absolute;top:0;left:0;right:0;bottom:0;visibility:hidden;}
+  .pane.active{visibility:visible;}
+  .pane iframe{display:block;width:100%;height:100%;border:0;background:var(--page);}
+
+  .msg{height:100%;overflow:auto;display:flex;align-items:center;justify-content:center;padding:24px 18px;background:var(--page);}
+  .msg-card{max-width:560px;background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:22px 24px;}
+  .msg-card h1{margin:0 0 8px;font-size:18px;}
+  .msg-card p{margin:0 0 10px;color:var(--ink-muted);}
+  .msg-card code{font-family:Consolas,"SF Mono",monospace;font-size:13px;color:var(--ink);word-break:break-all;}
+  .msg-card button{font:inherit;font-weight:600;margin-top:6px;padding:9px 16px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:var(--accent-ink);cursor:pointer;}
+</style>
+</head>
+<body>
+
+<div id="tabs" role="tablist" aria-label="Apps">
+  <span class="spacer" id="tabSpacer"></span>
+  <span id="buildTag" title="Build 2 - October 8, 2026">Build 2</span>
+  <button type="button" class="strip-btn" id="reloadBtn" title="Reload this tab" aria-label="Reload this tab">
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+  </button>
+</div>
+<div id="panes"></div>
+
+<script>
+(function(){
+  "use strict";
+
+  // ---------- the apps ----------
+  // path = where each app already lives on this same site (github.io address).
+  // Nothing in the apps themselves is changed: each still works at its own
+  // address. If a repository is ever renamed, its path here is the one thing
+  // to change. light / dark = that app's own page colour, used for its tab.
+  var APPS = [
+    {id: "database", name: "Database", short: "Database", path: "/Database/", light: "#f2f4f7", dark: "#12161b"},
+    {id: "install", name: "Install Tracker", short: "Install", path: "/Install-Tracker/", light: "#f4f1e9", dark: "#12161d"},
+    {id: "field", name: "Field Engineering", short: "Field Eng", path: "/FE/", light: "#f2f4f7", dark: "#12161b"}
+  ];
+  // Which tabs an account type gets (the Database's account types). Any type
+  // not listed here gets every tab. This only decides what is SHOWN: each app
+  // still enforces its own rules about who may open it.
+  var TABS_FOR_ROLE = {
+    driver: ["database"],                 // drivers: their deliveries page, full-screen, no tab strip
+    dashboard: ["database", "install"]    // dashboard-view logins have no Field Engineering access
+  };
+  var K = {tab: "apps.tab", role: "apps.role"};
+
+  function $(id){ return document.getElementById(id); }
+  function lsGet(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }
+  function lsSet(k, v){ try{ localStorage.setItem(k, v); }catch(e){} }
+  function byId(id){ for (var i = 0; i < APPS.length; i++) if (APPS[i].id === id) return APPS[i]; return null; }
+
+  var active = null;      // id of the open tab
+  var role = null;        // the signed-in login's account type, when known (null = not known: show every tab)
+  var lastUid = null;     // who is signed in, as last seen
+  var epoch = 0;          // goes up every time the sign-in changes (in, out, or a different person)
+
+  // ---------- who is signed in ----------
+  // All three apps keep the Supabase sign-in in this browser's storage for the
+  // site, which is why one sign-in covers them. This page only READS it, to
+  // know when the sign-in changed and which account type to ask about.
+  function currentSession(){
+    try{
+      for (var i = 0; i < localStorage.length; i++){
+        var k = localStorage.key(i);
+        if (!/^sb-.+-auth-token$/.test(k)) continue;
+        var v = JSON.parse(localStorage.getItem(k) || "null");
+        if (v && v.currentSession) v = v.currentSession;
+        if (v && v.user && v.user.id && v.access_token) return {uid: String(v.user.id), token: String(v.access_token)};
+      }
+    }catch(e){}
+    return null;
+  }
+  function observe(){
+    var s = currentSession(), uid = s ? s.uid : null;
+    if (uid !== lastUid){ lastUid = uid; epoch++; }
+    refreshRole(s);
+    return s;
+  }
+
+  // ---------- the account type, for which tabs to show ----------
+  // Read from the same place the apps read it (the Database's eq_profiles),
+  // using the site's own config.js - the same file the apps load.
+  function cloudConfig(){
+    var c = window.EQDB_CLOUD || window.ITDB_CLOUD || window.FET_CLOUD;
+    return c && /^https?:\/\//.test(String(c.url || "")) && c.anonKey && !/^PASTE/.test(String(c.anonKey)) ? c : null;
+  }
+  var configReady = new Promise(function(done){
+    var i = 0;
+    (function next(){
+      if (cloudConfig() || i >= APPS.length || location.protocol === "file:") return done(cloudConfig());
+      var s = document.createElement("script");
+      s.src = APPS[i++].path + "config.js"; s.onload = next; s.onerror = next;
+      document.head.appendChild(s);
+    })();
+  });
+  var roleAsked = "";   // the sign-in token the account type was last asked with
+  var roleRetryAt = 0;  // when to ask again after a lookup that couldn't be reached (0 = no need)
+  var known = null;     // {uid, role} as last answered; remembered on the device so the tabs are right at once next time
+  try{ known = JSON.parse(lsGet(K.role) || "null"); }catch(e){}
+  function refreshRole(s){
+    if (!s){ roleAsked = ""; setRole(null); return; }
+    setRole(known && known.uid === s.uid ? known.role : null);
+    if (roleAsked === s.token && !(roleRetryAt && Date.now() >= roleRetryAt)) return;
+    roleAsked = s.token; roleRetryAt = 0;
+    configReady.then(function(c){
+      if (!c) return null;
+      return fetch(String(c.url).replace(/\/+$/, "") + "/rest/v1/eq_profiles?select=role&id=eq." + encodeURIComponent(s.uid),
+          {headers: {apikey: c.anonKey, Authorization: "Bearer " + s.token, Accept: "application/json"}, cache: "no-store"})
+        .then(function(r){
+          if (r.status === 401) return null;   // the sign-in has just expired: the open app renews it, and that asks again
+          if (!r.ok) throw new Error("status " + r.status);
+          return r.json();
+        })
+        // a login with no line in that table is treated as full access, as the apps treat it
+        .then(function(rows){ return Array.isArray(rows) ? String((rows[0] && rows[0].role) || "staff") : null; });
+    }).then(function(found){
+      if (!found || lastUid !== s.uid) return;   // couldn't tell (offline, sign-in just expired): keep what is showing
+      known = {uid: s.uid, role: found};
+      lsSet(K.role, JSON.stringify(known));
+      setRole(found);
+    }, function(){ roleRetryAt = Date.now() + 60000; });   // couldn't be reached: ask again in a minute
+  }
+  function allowedIds(){
+    var list = role && TABS_FOR_ROLE[role];
+    return list && list.length ? list : APPS.map(function(a){ return a.id; });
+  }
+  function setRole(r){
+    if (r === role && active) return;
+    role = r;
+    var ok = allowedIds();
+    APPS.forEach(function(a){ a.tab.hidden = ok.indexOf(a.id) === -1; });
+    document.body.classList.toggle("single", ok.length === 1);
+    if (active && ok.indexOf(active) === -1) activate(ok[0]);
+  }
+
+  // ---------- panes ----------
+  function clearPane(app){ while (app.pane.firstChild) app.pane.removeChild(app.pane.firstChild); app.frame = null; }
+  // Puts the app in its pane (first visit, or again after the sign-in changed).
+  function open(app){
+    clearPane(app);
+    app.epoch = epoch;
+    var f = document.createElement("iframe");
+    f.title = app.name;
+    f.setAttribute("allow", "camera; clipboard-write; fullscreen");
+    f.src = app.path;
+    // An app that hasn't been put on the site yet would show GitHub's "not found" page: say so plainly
+    // instead. The app loads meanwhile, kept out of sight for the moment it takes to find out.
+    f.style.visibility = "hidden";
+    app.pane.appendChild(f);
+    app.frame = f;
+    fetch(app.path, {method: "HEAD", cache: "no-store"}).then(function(r){
+      if (app.frame !== f) return;
+      if (r.status === 404) showMissing(app); else f.style.visibility = "";
+    }, function(){ f.style.visibility = ""; /* no connection: the app opens from its own offline copy */ });
+  }
+  function showMissing(app){
+    clearPane(app);
+    var box = document.createElement("div");
+    box.className = "msg";
+    box.innerHTML = '<div class="msg-card"><h1></h1><p>This tab looks for it at:</p><p><code></code></p>' +
+      '<p>Upload it to GitHub at that address (its own build folder has the steps), then press Try again. The other tabs are not affected.</p>' +
+      '<button type="button">Try again</button></div>';
+    box.querySelector("h1").textContent = app.name + " isn't on the site yet";
+    box.querySelector("code").textContent = location.origin + app.path;
+    box.querySelector("button").addEventListener("click", function(){ open(app); });
+    app.pane.appendChild(box);
+  }
+
+  function activate(id, focusIt){
+    observe();
+    var ok = allowedIds();
+    var app = byId(id);
+    if (!app || ok.indexOf(app.id) === -1) app = byId(ok[0]);
+    var prev = byId(active);
+    // Only the open tab can be signed in to or out of, so whatever the sign-in is as we leave it is what it is showing.
+    if (prev && prev !== app && prev.frame) prev.epoch = epoch;
+    active = app.id;
+    // First visit - or the sign-in changed since this tab was last looked at, so what it shows is stale.
+    if (!app.pane.firstChild || (app.frame && app.epoch !== epoch)) open(app);
+    APPS.forEach(function(a){
+      var on = a === app;
+      a.tab.setAttribute("aria-selected", on ? "true" : "false");
+      a.tab.tabIndex = on ? 0 : -1;
+      a.pane.classList.toggle("active", on);
+    });
+    document.title = app.name + " - Apps";
+    lsSet(K.tab, app.id);
+    try{ history.replaceState(null, "", "#" + app.id); }catch(e){}
+    if (focusIt && app.frame){ try{ app.frame.contentWindow.focus(); }catch(e){} }
+  }
+
+  // ---------- build the page ----------
+  if (location.protocol === "file:"){
+    // Opened straight from a folder on the PC: the apps can't share a sign-in that way.
+    $("tabs").hidden = true;
+    $("panes").innerHTML = '<div class="msg"><div class="msg-card"><h1>This page works once it is on GitHub</h1>' +
+      '<p>It shows the three apps from the same site it is on, so it has to be uploaded next to them (see the read-me). Opening the file from a folder on the PC can\'t do that.</p></div></div>';
+    return;
+  }
+  APPS.forEach(function(app){
+    var t = document.createElement("button");
+    t.type = "button"; t.className = "tab"; t.id = "tab-" + app.id;
+    t.setAttribute("role", "tab"); t.setAttribute("aria-selected", "false"); t.setAttribute("aria-controls", "pane-" + app.id);
+    t.style.setProperty("--l", app.light); t.style.setProperty("--d", app.dark);
+    t.innerHTML = '<span class="long"></span><span class="short"></span>';
+    t.querySelector(".long").textContent = app.name; t.querySelector(".short").textContent = app.short;
+    t.title = app.name;
+    t.addEventListener("click", function(){ activate(app.id, true); });
+    $("tabs").insertBefore(t, $("tabSpacer"));
+    var p = document.createElement("div");
+    p.className = "pane"; p.id = "pane-" + app.id;
+    p.setAttribute("role", "tabpanel"); p.setAttribute("aria-labelledby", t.id);
+    $("panes").appendChild(p);
+    app.tab = t; app.pane = p; app.frame = null; app.epoch = -1;
+  });
+  // left / right arrow keys step through the tabs, as in a browser
+  $("tabs").addEventListener("keydown", function(ev){
+    if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+    var shown = APPS.filter(function(a){ return !a.tab.hidden; });
+    var i = shown.indexOf(byId(active));
+    if (i === -1 || shown.length < 2) return;
+    var next = shown[(i + (ev.key === "ArrowRight" ? 1 : shown.length - 1)) % shown.length];
+    ev.preventDefault();
+    activate(next.id);
+    next.tab.focus();
+  });
+  // Reloads just the open tab (the app asks first if it has anything unsaved).
+  $("reloadBtn").addEventListener("click", function(){
+    var app = byId(active);
+    if (!app) return;
+    if (!app.frame){ open(app); return; }
+    try{ app.frame.contentWindow.location.reload(); }catch(e){ open(app); }
+  });
+
+  // the sign-in changed in one of the apps (or in another window): look again
+  window.addEventListener("storage", function(ev){ if (!ev.key || /^sb-.+-auth-token$/.test(ev.key)) observe(); });
+  setInterval(observe, 4000);
+  window.addEventListener("hashchange", function(){
+    var want = location.hash.replace(/^#/, "");
+    if (byId(want) && want !== active) activate(want);
+  });
+
+  observe();
+  var want = location.hash.replace(/^#/, "");
+  activate(byId(want) ? want : (lsGet(K.tab) || APPS[0].id));
+
+  if ("serviceWorker" in navigator && /^https?:$/.test(location.protocol)){
+    window.addEventListener("load", function(){ navigator.serviceWorker.register("sw.js").catch(function(){}); });
+  }
+})();
+</script>
+</body></html>
