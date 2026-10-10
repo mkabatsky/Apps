@@ -48,6 +48,8 @@
   .strip-btn:hover{background:var(--tab-hover);}
   /* a login with only one app gets that app full-screen, exactly as it looks on its own */
   body.single #tabs{display:none;}
+  /* a login with no app switched on: one message and nothing else */
+  body.no-apps #tabs{display:none;}
   /* fingers need a bigger target than a mouse does */
   @media (pointer:coarse){
     .tab{min-height:44px;font-size:14px;padding-top:11px;padding-bottom:12px;}
@@ -79,12 +81,12 @@
 
 <div id="tabs" role="tablist" aria-label="Apps">
   <span class="spacer" id="tabSpacer"></span>
-  <span id="buildTag" title="Build 4 - October 9, 2026">Build 4</span>
+  <span id="buildTag" title="Build 5 - October 9, 2026">Build 5</span>
   <button type="button" class="strip-btn" id="reloadBtn" title="Reload this tab" aria-label="Reload this tab">
     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
   </button>
 </div>
-<div id="panes"></div>
+<div id="panes"><div class="msg" id="noApps" hidden><div class="msg-card"><h1>This login has no apps switched on - ask an Admin.</h1><p>An Admin switches the apps on for each login in the Equipment Database, under Manage users. Once that is done, sign out here and sign in again.</p><button type="button" id="noAppsOut">Sign out</button></div></div></div>
 
 <script>
 (function(){
@@ -119,8 +121,63 @@
     var r = String((row && row.role) || "staff"), k = String((row && row.fe_kind) || "");
     return k && FE_KIND_ROLE[k] === r ? k : r;
   }
+  // ---------- which apps a login has ----------
+  // Since the job matrix every login has a level in EACH app, set in the
+  // Database's Manage users, and the database answers one question about the
+  // login that asks (ax_whoami): {db, it, fe: its level in the Database, the
+  // Install Tracker and the Field Engineering Tracker - "none" = that app is
+  // not switched on for it}. A tab is shown for each app the login has, always
+  // in the same order. This only decides what is SHOWN: each app still
+  // enforces its own rules about who may open it.
+  var WHO_LEVELS = {
+    db: ["viewer", "participant", "staff", "driver", "dashboard"],
+    it: ["viewer", "participant", "staff", "dashboard"],
+    fe: ["viewer", "participant", "staff"]
+  };
+  // The answer as this page uses it: {tabs: which tabs, in order, dash: true
+  // for a Dashboard login}. A level that is missing or not understood counts
+  // as "not switched on". null = that wasn't an answer at all.
+  function whoView(a){
+    if (Array.isArray(a)) a = a[0];
+    if (!a || typeof a !== "object" || (typeof a.db !== "string" && typeof a.it !== "string" && typeof a.fe !== "string")) return null;
+    var has = function(k){ return WHO_LEVELS[k].indexOf(String(a[k] || "")) !== -1; };
+    var tabs = [];
+    if (has("db")) tabs.push("database");
+    if (has("it")) tabs.push("install");
+    if (has("fe")) tabs.push("field");
+    // a Dashboard screen - in the Database or in the Install Tracker - is never signed out by the apps
+    return {tabs: tabs, dash: a.db === "dashboard" || a.it === "dashboard"};
+  }
+  // The same, worked out from an account type: for a database from before the
+  // job matrix (what this page went by up to Build 4, unchanged).
+  function roleView(type){
+    var list = type && TABS_FOR_ROLE[type];
+    return {tabs: list && list.length ? list.slice() : APPS.map(function(a){ return a.id; }), dash: type === "dashboard"};
+  }
+  // What this device kept from last time. Only this build's own shape counts;
+  // anything older is passed over, and the database is asked again.
+  // The tabs stay in the order they were kept in: the first one is the tab the
+  // login opens on, and for a database from before the job matrix that is not
+  // always the first tab on the page (an FE or FE Viewer account opens on Field
+  // Engineering, as it did up to Build 4). With the job matrix the order kept
+  // is the page's own anyway. A tab this page doesn't have, or one named
+  // twice, is dropped.
+  function cleanKnown(k){
+    if (!k || k.v !== 2 || !k.uid || !Array.isArray(k.tabs)) return null;
+    var ids = APPS.map(function(a){ return a.id; });
+    return {uid: String(k.uid), v: 2, tabs: k.tabs.filter(function(id, i){ return ids.indexOf(id) !== -1 && k.tabs.indexOf(id) === i; }), dash: k.dash === true};
+  }
+  // Is the database saying it doesn't have the question at all? Then the job
+  // matrix hasn't been set up there yet (add-job-matrix.sql not run), and this
+  // page asks the way it always has.
+  function whoIsOldDatabase(status, body){
+    return status === 404 || (!!body && body.code === "PGRST202");
+  }
+  function sameView(a, b){
+    return a === b || (!!a && !!b && a.dash === b.dash && a.tabs.join() === b.tabs.join());
+  }
   var K = {tab: "apps.tab", role: "apps.role"};
-  var SW_CACHE = "apps-page-v4";   // the same name as CACHE in sw.js
+  var SW_CACHE = "apps-page-v5";   // the same name as CACHE in sw.js
 
   function $(id){ return document.getElementById(id); }
   function lsGet(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }
@@ -128,7 +185,8 @@
   function byId(id){ for (var i = 0; i < APPS.length; i++) if (APPS[i].id === id) return APPS[i]; return null; }
 
   var active = null;      // id of the open tab
-  var role = null;        // the signed-in login's account type, when known (null = not known: show every tab)
+  var view = null;        // which tabs the signed-in login gets, when known: {tabs, dash} (null = not known: show every tab)
+  var noApps = false;     // the "this login has no apps" message is up
   var lastUid = null;     // who is signed in, as last seen
   var epoch = 0;          // goes up every time the sign-in changes (in, out, or a different person)
 
@@ -195,7 +253,7 @@
     if (navigator.onLine === false || now - lastBuildLook < 10 * 60000) return;
     var st = null;
     try{ st = JSON.parse(lsGet("mkapps.signInDay") || "null"); }catch(e){}
-    if (!lastUid || !((st && st.x) || role === "dashboard")) return;
+    if (!lastUid || !((st && st.x) || (view && view.dash))) return;
     lastBuildLook = now;
     fetch("sw.js", {cache: "no-store"}).then(function(r){ return r.ok ? r.text() : ""; }).then(function(text){
       var m = /CACHE\s*=\s*["']([^"']+)["']/.exec(text || "");
@@ -227,9 +285,10 @@
     });
   }
 
-  // ---------- the account type, for which tabs to show ----------
-  // Read from the same place the apps read it (the Database's eq_profiles),
-  // using the site's own config.js - the same file the apps load.
+  // ---------- asking the database which apps the login has ----------
+  // The same question the three apps ask after a sign-in (see "which apps a
+  // login has" above), using the site's own config.js - the same file the apps
+  // load.
   function cloudConfig(){
     var c = window.EQDB_CLOUD || window.ITDB_CLOUD || window.FET_CLOUD;
     return c && /^https?:\/\//.test(String(c.url || "")) && c.anonKey && !/^PASTE/.test(String(c.anonKey)) ? c : null;
@@ -243,49 +302,99 @@
       document.head.appendChild(s);
     })();
   });
-  var roleAsked = "";   // the sign-in token the account type was last asked with
+  var roleAsked = "";   // the sign-in token the question was last asked with
   var roleRetryAt = 0;  // when to ask again after a lookup that couldn't be reached (0 = no need)
-  var known = null;     // {uid, role} as last answered; remembered on the device so the tabs are right at once next time
-  try{ known = JSON.parse(lsGet(K.role) || "null"); }catch(e){}
+  var known = null;     // {uid, v: 2, tabs, dash} as last answered; remembered on the device so the tabs are right at once next time
+  try{ known = cleanKnown(JSON.parse(lsGet(K.role) || "null")); }catch(e){}
   function refreshRole(s){
-    if (!s){ roleAsked = ""; setRole(null); return; }
-    setRole(known && known.uid === s.uid ? known.role : null);
+    if (!s){ roleAsked = ""; setView(null); return; }
+    setView(known && known.uid === s.uid ? known : null);
     if (roleAsked === s.token && !(roleRetryAt && Date.now() >= roleRetryAt)) return;
     roleAsked = s.token; roleRetryAt = 0;
     configReady.then(function(c){
       if (!c) return null;
-      function ask(columns){
-        return fetch(String(c.url).replace(/\/+$/, "") + "/rest/v1/eq_profiles?select=" + columns + "&id=eq." + encodeURIComponent(s.uid),
-          {headers: {apikey: c.anonKey, Authorization: "Bearer " + s.token, Accept: "application/json"}, cache: "no-store"});
-      }
-      return ask("role,fe_kind").then(function(r){
-          // a database from before the PC-FE / FE / FE Viewer types has no such column: ask the old way
-          return r.status === 400 ? ask("role") : r;
-        }).then(function(r){
-          if (r.status === 401) return null;   // the sign-in has just expired: the open app renews it, and that asks again
-          if (!r.ok) throw new Error("status " + r.status);
-          return r.json();
-        })
-        // a login with no line in that table is treated as full access, as the apps treat it
-        .then(function(rows){ return Array.isArray(rows) ? accountType(rows[0]) : null; });
+      return askWho(c, s).then(function(found){
+        if (found !== OLD_DATABASE) return found;
+        // an older database: the request this page has always made, and the tabs by account type
+        return askOldDatabase(c, s).then(function(type){ return type ? roleView(type) : null; });
+      });
     }).then(function(found){
       if (!found || lastUid !== s.uid) return;   // couldn't tell (offline, sign-in just expired): keep what is showing
-      known = {uid: s.uid, role: found};
+      known = {uid: s.uid, v: 2, tabs: found.tabs, dash: found.dash};
       lsSet(K.role, JSON.stringify(known));
-      setRole(found);
+      // a login with no app at all: look again in a minute, in case an Admin has just switched one on
+      if (!found.tabs.length) roleRetryAt = Date.now() + 60000;
+      setView(known);
     }, function(){ roleRetryAt = Date.now() + 60000; });   // couldn't be reached: ask again in a minute
   }
-  function allowedIds(){
-    var list = role && TABS_FOR_ROLE[role];
-    return list && list.length ? list : APPS.map(function(a){ return a.id; });
+  var OLD_DATABASE = "old";
+  // Asks the database what the signed-in login has. Gives {tabs, dash};
+  // OLD_DATABASE when the database doesn't have the question; null when it
+  // can't tell just now. Uses the site's own config.js - the same file the
+  // apps load.
+  function askWho(c, s){
+    return fetch(String(c.url).replace(/\/+$/, "") + "/rest/v1/rpc/ax_whoami",
+      {method: "POST", headers: {apikey: c.anonKey, Authorization: "Bearer " + s.token, "Content-Type": "application/json", Accept: "application/json"}, body: "{}", cache: "no-store"})
+      .then(function(r){
+        if (r.status === 401) return null;   // the sign-in has just expired: the open app renews it, and that asks again
+        return r.json().then(null, function(){ return null; }).then(function(body){
+          if (whoIsOldDatabase(r.status, body)) return OLD_DATABASE;
+          if (!r.ok) throw new Error("status " + r.status);
+          var v = whoView(body);
+          if (!v) throw new Error("not an answer");
+          return v;
+        });
+      });
   }
-  function setRole(r){
-    if (r === role && active) return;
-    role = r;
+  // The request this page made up to Build 4, kept as it was: the login's
+  // account type from the Database's eq_profiles. Gives the account type, or
+  // null when it can't tell just now.
+  function askOldDatabase(c, s){
+    function ask(columns){
+      return fetch(String(c.url).replace(/\/+$/, "") + "/rest/v1/eq_profiles?select=" + columns + "&id=eq." + encodeURIComponent(s.uid),
+        {headers: {apikey: c.anonKey, Authorization: "Bearer " + s.token, Accept: "application/json"}, cache: "no-store"});
+    }
+    return ask("role,fe_kind").then(function(r){
+        // a database from before the PC-FE / FE / FE Viewer types has no such column: ask the old way
+        return r.status === 400 ? ask("role") : r;
+      }).then(function(r){
+        if (r.status === 401) return null;   // the sign-in has just expired: the open app renews it, and that asks again
+        if (!r.ok) throw new Error("status " + r.status);
+        return r.json();
+      })
+      // a login with no line in that table is treated as full access, as the apps treat it
+      .then(function(rows){ return Array.isArray(rows) ? accountType(rows[0]) : null; });
+  }
+  function allowedIds(){
+    return view ? view.tabs : APPS.map(function(a){ return a.id; });
+  }
+  // A login with no app switched on: one message, no tabs, and nothing left
+  // running behind it.
+  function showNoApps(on){
+    noApps = on;
+    $("noApps").hidden = !on;
+    document.body.classList.toggle("no-apps", on);
+    if (!on) return;
+    APPS.forEach(function(a){
+      clearPane(a); a.epoch = -1;
+      a.pane.classList.remove("active");
+      a.tab.setAttribute("aria-selected", "false"); a.tab.tabIndex = -1;
+    });
+    active = null;
+    document.title = "Apps";
+  }
+  function setView(v){
+    if (sameView(v, view) && (active || noApps)) return;
+    var wasNoApps = noApps;
+    view = v;
     var ok = allowedIds();
     APPS.forEach(function(a){ a.tab.hidden = ok.indexOf(a.id) === -1; });
     document.body.classList.toggle("single", ok.length === 1);
+    showNoApps(!ok.length);
+    if (!ok.length) return;
     if (active && ok.indexOf(active) === -1) activate(ok[0]);
+    // coming from the "no apps" message: nothing is open yet, so open the tab this device was on last (or the first)
+    else if (wasNoApps && !active) activate(lsGet(K.tab) || ok[0]);
   }
 
   // ---------- panes ----------
@@ -324,6 +433,7 @@
   function activate(id, focusIt){
     observe();
     var ok = allowedIds();
+    if (!ok.length) return;   // this login has no app: the message is showing instead
     var app = byId(id);
     if (!app || ok.indexOf(app.id) === -1) app = byId(ok[0]);
     var prev = byId(active);
@@ -385,6 +495,22 @@
     if (!app) return;
     if (!app.frame){ open(app); return; }
     try{ app.frame.contentWindow.location.reload(); }catch(e){ open(app); }
+  });
+
+  // On the "no apps" message no app is open that could sign out, so this page
+  // does it - the one time it changes the sign-in rather than reads it. What
+  // the browser keeps of the sign-in is removed (the apps treat that as
+  // "signed out"), every tab comes back, and each shows its sign-in form.
+  $("noAppsOut").addEventListener("click", function(){
+    try{
+      var gone = [];
+      for (var i = 0; i < localStorage.length; i++){
+        var k = localStorage.key(i);
+        if (k && /^sb-.+-auth-token(-code-verifier)?$/.test(k)) gone.push(k);
+      }
+      gone.forEach(function(k){ localStorage.removeItem(k); });
+    }catch(e){}
+    observe();
   });
 
   // the sign-in changed in one of the apps (or in another window): look again
