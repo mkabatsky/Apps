@@ -1,7 +1,7 @@
 // Service worker for the tab page: lets it open offline and pick up new versions when online.
-// Bump CACHE (v5 -> v6 ...) whenever you upload a new index.html so tablets refresh.
+// Bump CACHE (v6 -> v7 ...) whenever you upload a new index.html so tablets refresh.
 // The three apps inside the tabs are looked after by their own service workers, not this one.
-var CACHE = "apps-page-v5";
+var CACHE = "apps-page-v6";
 var CORE = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png"];
 
 self.addEventListener("install", function(e){
@@ -38,8 +38,9 @@ self.addEventListener("fetch", function(e){
       return res;
     }).catch(function(){
       return caches.open(CACHE).then(function(c){
-        return c.match(req).then(function(r){
-          return r || (req.mode === "navigate" ? c.match("./index.html") : Response.error());
+        // a page visit: the copy from the last visit with a connection comes first
+        return (req.mode === "navigate" ? c.match("./index.html") : Promise.resolve(null)).then(function(page){
+          return page || c.match(req).then(function(r){ return r || Response.error(); });
         });
       });
     })

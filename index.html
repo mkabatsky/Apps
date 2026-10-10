@@ -46,7 +46,8 @@
   .strip-btn{align-self:center;margin-bottom:4px;display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;
     border:0;border-radius:8px;background:transparent;color:var(--strip-ink);cursor:pointer;}
   .strip-btn:hover{background:var(--tab-hover);}
-  /* a login with only one app gets that app full-screen, exactly as it looks on its own */
+  /* a login with only one app gets that app full-screen, exactly as it looks on its own -
+     and so does the page while nobody is signed in (one sign-in form, no tabs) */
   body.single #tabs{display:none;}
   /* a login with no app switched on: one message and nothing else */
   body.no-apps #tabs{display:none;}
@@ -77,11 +78,11 @@
   .msg-card button{font:inherit;font-weight:600;margin-top:6px;padding:9px 16px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:var(--accent-ink);cursor:pointer;}
 </style>
 </head>
-<body>
+<body class="single">
 
 <div id="tabs" role="tablist" aria-label="Apps">
   <span class="spacer" id="tabSpacer"></span>
-  <span id="buildTag" title="Build 5 - October 9, 2026">Build 5</span>
+  <span id="buildTag" title="Build 6 - October 10, 2026">Build 6</span>
   <button type="button" class="strip-btn" id="reloadBtn" title="Reload this tab" aria-label="Reload this tab">
     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
   </button>
@@ -176,8 +177,8 @@
   function sameView(a, b){
     return a === b || (!!a && !!b && a.dash === b.dash && a.tabs.join() === b.tabs.join());
   }
-  var K = {tab: "apps.tab", role: "apps.role"};
-  var SW_CACHE = "apps-page-v5";   // the same name as CACHE in sw.js
+  var K = {tab: "apps.tab", role: "apps.role", mx: "apps.mx"};
+  var SW_CACHE = "apps-page-v6";   // the same name as CACHE in sw.js
 
   function $(id){ return document.getElementById(id); }
   function lsGet(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }
@@ -185,7 +186,7 @@
   function byId(id){ for (var i = 0; i < APPS.length; i++) if (APPS[i].id === id) return APPS[i]; return null; }
 
   var active = null;      // id of the open tab
-  var view = null;        // which tabs the signed-in login gets, when known: {tabs, dash} (null = not known: show every tab)
+  var view = null;        // which tabs the signed-in login gets, when known: {tabs, dash} (null = nobody is signed in, or not known yet: no tabs - see allowedIds)
   var noApps = false;     // the "this login has no apps" message is up
   var lastUid = null;     // who is signed in, as last seen
   var epoch = 0;          // goes up every time the sign-in changes (in, out, or a different person)
@@ -211,6 +212,7 @@
     if (uid !== lastUid){
       var fromNobody = !lastUid;
       lastUid = uid; epoch++;
+      askedSince = 0; expired = false; roleTries = 0;   // (see "asking the database which apps the login has")
       if (!uid) dayReload();
       // Someone has just signed in (in one of the tabs, or in another window).
       // Any tab still sitting on its sign-in form is loaded again, so one
@@ -247,13 +249,15 @@
   // A Dashboard login is never signed out, so its screen can stay up for
   // weeks. While one is signed in, this page looks for a newer build of
   // itself every ten minutes and reloads when there is one (once per build).
+  // So does a screen left open with nobody signed in - all it has is a sign-in
+  // form - unless someone has touched a page in the last minute.
   var lastBuildLook = Date.now();
   function buildCheck(){
     var now = Date.now();
     if (navigator.onLine === false || now - lastBuildLook < 10 * 60000) return;
     var st = null;
     try{ st = JSON.parse(lsGet("mkapps.signInDay") || "null"); }catch(e){}
-    if (!lastUid || !((st && st.x) || (view && view.dash))) return;
+    if (lastUid ? !((st && st.x) || (view && view.dash)) : now - (Number(lsGet("mkapps.lastActive")) || 0) < 60000) return;
     lastBuildLook = now;
     fetch("sw.js", {cache: "no-store"}).then(function(r){ return r.ok ? r.text() : ""; }).then(function(text){
       var m = /CACHE\s*=\s*["']([^"']+)["']/.exec(text || "");
@@ -281,7 +285,10 @@
     var ok = allowedIds();
     APPS.forEach(function(a){
       if (!a.frame || ok.indexOf(a.id) === -1) return;
-      if (showsSignIn(a)) open(a); else if (settle) a.epoch = epoch;
+      // (once per sign-in: open() marks it, so a tab that is starting up again - or that has turned
+      // this login away and shows its form for that reason - is left alone at the second look)
+      if (showsSignIn(a)){ if (a.epoch !== epoch) open(a); }
+      else if (settle) a.epoch = epoch;
     });
   }
 
@@ -293,50 +300,123 @@
     var c = window.EQDB_CLOUD || window.ITDB_CLOUD || window.FET_CLOUD;
     return c && /^https?:\/\//.test(String(c.url || "")) && c.anonKey && !/^PASTE/.test(String(c.anonKey)) ? c : null;
   }
-  var configReady = new Promise(function(done){
-    var i = 0;
-    (function next(){
-      if (cloudConfig() || i >= APPS.length || location.protocol === "file:") return done(cloudConfig());
-      var s = document.createElement("script");
-      s.src = APPS[i++].path + "config.js"; s.onload = next; s.onerror = next;
-      document.head.appendChild(s);
-    })();
-  });
+  // (If none could be loaded - no connection at that moment - it is looked for
+  // again the next time it is needed, not given up on for the life of the page.)
+  var configTry = null;
+  function configReady(){
+    if (configTry) return configTry;
+    var mine = configTry = new Promise(function(done){
+      var i = 0;
+      (function next(){
+        if (cloudConfig() || i >= APPS.length || location.protocol === "file:") return done(cloudConfig());
+        var s = document.createElement("script");
+        s.src = APPS[i++].path + "config.js";
+        s.onload = s.onerror = function(){ if (s.parentNode) s.parentNode.removeChild(s); next(); };
+        document.head.appendChild(s);
+      })();
+    }).then(function(c){ if (!c && configTry === mine) configTry = null; return c; });
+    return mine;
+  }
+  configReady();
   var roleAsked = "";   // the sign-in token the question was last asked with
   var roleRetryAt = 0;  // when to ask again after a lookup that couldn't be reached (0 = no need)
+  var roleTries = 0;    // how many times in a row the question went unanswered for this sign-in
+  // While no tab is showing yet (signed in, but the login's apps are not known),
+  // an unanswered question is asked again within seconds, a few times; after
+  // that, and whenever the login's own tabs are showing, once a minute.
+  function retryWait(){
+    roleTries++;
+    return !view && roleTries <= 6 ? 5000 : 60000;
+  }
+  // A question that gets no answer at all (a connection that stalls) is asked
+  // again after this long. The first one is not given up on: if its answer
+  // does come, it is taken.
+  var WHO_WAIT_MS = 8000;
+  // "Your sign-in has expired" (the open app renews it, and the question is
+  // then asked again with the new one).
+  var EXPIRED = "expired";
+  // THE LAST RESORT, for someone who IS signed in. If the database still has
+  // not said which apps the login has this long after it was first asked (the
+  // question keeps failing, or gets no answer - not when the reply is "your
+  // sign-in has expired"), every tab is offered, as it was up to Build 5, so
+  // that nobody is left on one app with no way on. Each app still lets in only
+  // the logins that have it. The tabs become the login's own the moment an
+  // answer comes, and go when it signs out. A visitor - nobody signed in -
+  // never gets them.
+  var GUESS_AFTER_MS = 12000;
+  var askedSince = 0;   // when the question was first asked for the login that is signed in (0 = not yet)
+  var expired = false;  // the last reply was "your sign-in has expired"
+  var guessOn = false;  // every tab is being offered as that last resort
+  function guessNow(){
+    return !!lastUid && !expired && askedSince > 0 && Date.now() - askedSince >= GUESS_AFTER_MS;
+  }
   var known = null;     // {uid, v: 2, tabs, dash} as last answered; remembered on the device so the tabs are right at once next time
   try{ known = cleanKnown(JSON.parse(lsGet(K.role) || "null")); }catch(e){}
+  // Yesterday's sign-in is still on this device and nobody has touched a page
+  // for a while: the app that opens ends it (the apps' daily rule) - or carries
+  // on with it (no connection; the site can't be reached; a Dashboard login).
+  // Until one or the other has happened, for a few seconds, no tab is offered:
+  // by the apps' own rule nobody is signed in today yet.
+  var DAY_HOLD_MS = 20000, dayHoldFrom = 0;
+  function dayOver(){
+    var st = null;
+    try{ st = JSON.parse(lsGet("mkapps.signInDay") || "null"); }catch(e){}
+    if (!st || !st.d || st.d === today() || st.x || navigator.onLine === false || Date.now() - (Number(lsGet("mkapps.lastActive")) || 0) < 3 * 60000){ dayHoldFrom = 0; return false; }
+    if (!dayHoldFrom) dayHoldFrom = Date.now();
+    return Date.now() - dayHoldFrom < DAY_HOLD_MS;
+  }
   function refreshRole(s){
-    if (!s){ roleAsked = ""; setView(null); return; }
-    setView(known && known.uid === s.uid ? known : null);
+    if (!s){ roleAsked = ""; roleRetryAt = 0; setView(null); return; }
+    setView(known && known.uid === s.uid && !dayOver() ? known : null);
     if (roleAsked === s.token && !(roleRetryAt && Date.now() >= roleRetryAt)) return;
+    if (roleAsked !== s.token) expired = false;   // (a renewed sign-in: not known to have expired)
+    if (!askedSince) askedSince = Date.now();
     roleAsked = s.token; roleRetryAt = 0;
-    configReady.then(function(c){
+    var answered = false;
+    setTimeout(function(){
+      // no answer at all so far: ask again (see WHO_WAIT_MS)
+      if (!answered && lastUid === s.uid && roleAsked === s.token){ expired = false; if (!roleRetryAt) roleRetryAt = Date.now() + retryWait(); }
+    }, WHO_WAIT_MS);
+    configReady().then(function(c){
       if (!c) return null;
       return askWho(c, s).then(function(found){
-        if (found !== OLD_DATABASE) return found;
+        if (found !== OLD_DATABASE){ if (found && found !== EXPIRED && !lsGet(K.mx)) lsSet(K.mx, "1"); return found; }
+        // (this device has had the job matrix's answer before: "not found" now is a hiccup, not an old database)
+        if (lsGet(K.mx)) throw new Error("the question was not found");
         // an older database: the request this page has always made, and the tabs by account type
-        return askOldDatabase(c, s).then(function(type){ return type ? roleView(type) : null; });
+        return askOldDatabase(c, s).then(function(type){ return type ? roleView(type) : EXPIRED; });
       });
     }).then(function(found){
-      if (!found || lastUid !== s.uid) return;   // couldn't tell (offline, sign-in just expired): keep what is showing
+      answered = true;
+      if (lastUid !== s.uid) return;
+      // Couldn't tell: keep what is showing. While that is no tab at all, ask again shortly.
+      if (!found || found === EXPIRED){
+        if (roleAsked === s.token) expired = found === EXPIRED;
+        if (!view) roleRetryAt = Date.now() + retryWait();
+        return;
+      }
+      expired = false; roleTries = 0;
       known = {uid: s.uid, v: 2, tabs: found.tabs, dash: found.dash};
       lsSet(K.role, JSON.stringify(known));
       // a login with no app at all: look again in a minute, in case an Admin has just switched one on
-      if (!found.tabs.length) roleRetryAt = Date.now() + 60000;
-      setView(known);
-    }, function(){ roleRetryAt = Date.now() + 60000; });   // couldn't be reached: ask again in a minute
+      roleRetryAt = found.tabs.length ? 0 : Date.now() + 60000;
+      if (!dayOver()) setView(known);   // (else: at the next look, once the day's sign-in has been settled)
+    }, function(){
+      answered = true;
+      // couldn't be reached: ask again (see retryWait)
+      if (lastUid === s.uid){ if (roleAsked === s.token) expired = false; roleRetryAt = Date.now() + retryWait(); }
+    });
   }
   var OLD_DATABASE = "old";
   // Asks the database what the signed-in login has. Gives {tabs, dash};
-  // OLD_DATABASE when the database doesn't have the question; null when it
-  // can't tell just now. Uses the site's own config.js - the same file the
+  // OLD_DATABASE when the database doesn't have the question; EXPIRED when it
+  // says the sign-in has expired. Uses the site's own config.js - the same file the
   // apps load.
   function askWho(c, s){
     return fetch(String(c.url).replace(/\/+$/, "") + "/rest/v1/rpc/ax_whoami",
       {method: "POST", headers: {apikey: c.anonKey, Authorization: "Bearer " + s.token, "Content-Type": "application/json", Accept: "application/json"}, body: "{}", cache: "no-store"})
       .then(function(r){
-        if (r.status === 401) return null;   // the sign-in has just expired: the open app renews it, and that asks again
+        if (r.status === 401) return EXPIRED;   // the sign-in has just expired: the open app renews it, and that asks again
         return r.json().then(null, function(){ return null; }).then(function(body){
           if (whoIsOldDatabase(r.status, body)) return OLD_DATABASE;
           if (!r.ok) throw new Error("status " + r.status);
@@ -365,8 +445,23 @@
       // a login with no line in that table is treated as full access, as the apps treat it
       .then(function(rows){ return Array.isArray(rows) ? accountType(rows[0]) : null; });
   }
+  // The app the page starts on: the one named in the address (#install), else
+  // the one this device was on last, else the first.
+  function startId(){
+    var want = location.hash.replace(/^#/, "");
+    if (byId(want)) return want;
+    var last = lsGet(K.tab);
+    return byId(last) ? last : APPS[0].id;
+  }
+  // The apps that may be opened. Tabs are only for a login that is signed in
+  // and whose apps the database has named. Until then - nobody is signed in,
+  // or the answer isn't here yet - it is ONE app: the one that is open (all it
+  // shows is its own sign-in form), with no tab strip and no way from here to
+  // the others. (The one exception is the last resort above: guessOn.)
   function allowedIds(){
-    return view ? view.tabs : APPS.map(function(a){ return a.id; });
+    if (view) return view.tabs;
+    if (guessOn) return APPS.map(function(a){ return a.id; });
+    return [byId(active) ? active : startId()];
   }
   // A login with no app switched on: one message, no tabs, and nothing left
   // running behind it.
@@ -384,12 +479,15 @@
     document.title = "Apps";
   }
   function setView(v){
-    if (sameView(v, view) && (active || noApps)) return;
+    var guess = !v && guessNow() && !dayOver();
+    if (sameView(v, view) && guess === guessOn && (active || noApps)) return;
     var wasNoApps = noApps;
-    view = v;
+    view = v; guessOn = guess;
     var ok = allowedIds();
-    APPS.forEach(function(a){ a.tab.hidden = ok.indexOf(a.id) === -1; });
-    document.body.classList.toggle("single", ok.length === 1);
+    // no tab is offered until the login's apps are known (see allowedIds)
+    var strip = !!view || guessOn;
+    APPS.forEach(function(a){ a.tab.hidden = !strip || ok.indexOf(a.id) === -1; });
+    document.body.classList.toggle("single", !strip || ok.length === 1);
     showNoApps(!ok.length);
     if (!ok.length) return;
     if (active && ok.indexOf(active) === -1) activate(ok[0]);
@@ -399,6 +497,7 @@
 
   // ---------- panes ----------
   function clearPane(app){ while (app.pane.firstChild) app.pane.removeChild(app.pane.firstChild); app.frame = null; }
+  var SHOW_ANYWAY_MS = 2500;
   // Puts the app in its pane (first visit, or again after the sign-in changed).
   function open(app){
     clearPane(app);
@@ -416,6 +515,8 @@
       if (app.frame !== f) return;
       if (r.status === 404) showMissing(app); else f.style.visibility = "";
     }, function(){ f.style.visibility = ""; /* no connection: the app opens from its own offline copy */ });
+    // (a request that neither answers nor fails must not leave an empty screen: the app shows after a moment anyway)
+    setTimeout(function(){ if (app.frame === f) f.style.visibility = ""; }, SHOW_ANYWAY_MS);
   }
   function showMissing(app){
     clearPane(app);
@@ -438,7 +539,7 @@
     if (!app || ok.indexOf(app.id) === -1) app = byId(ok[0]);
     var prev = byId(active);
     // Only the open tab can be signed in to or out of, so whatever the sign-in is as we leave it is what it is showing.
-    if (prev && prev !== app && prev.frame) prev.epoch = epoch;
+    if (prev && prev !== app && prev.frame && !showsSignIn(prev)) prev.epoch = epoch;
     active = app.id;
     // First visit - or the sign-in changed since this tab was last looked at, so what it shows is stale.
     if (!app.pane.firstChild || (app.frame && app.epoch !== epoch)) open(app);
@@ -500,7 +601,7 @@
   // On the "no apps" message no app is open that could sign out, so this page
   // does it - the one time it changes the sign-in rather than reads it. What
   // the browser keeps of the sign-in is removed (the apps treat that as
-  // "signed out"), every tab comes back, and each shows its sign-in form.
+  // "signed out"), and the page is back to one app's sign-in form, no tabs.
   $("noAppsOut").addEventListener("click", function(){
     try{
       var gone = [];
@@ -514,7 +615,14 @@
   });
 
   // the sign-in changed in one of the apps (or in another window): look again
-  window.addEventListener("storage", function(ev){ if (!ev.key || /^sb-.+-auth-token$/.test(ev.key)) observe(); });
+  window.addEventListener("storage", function(ev){ if (!ev.key || ev.key === "mkapps.signInDay" || /^sb-.+-auth-token$/.test(ev.key)) observe(); });
+  // ...and when the page comes back to the front (a tablet waking, the Back
+  // button), or the connection comes back - then a question that was waiting
+  // to be asked again is asked at once
+  document.addEventListener("visibilitychange", function(){ if (!document.hidden) observe(); });
+  window.addEventListener("pageshow", function(){ observe(); });
+  window.addEventListener("focus", function(){ observe(); });
+  window.addEventListener("online", function(){ if (roleRetryAt) roleRetryAt = Date.now(); observe(); });
   setInterval(function(){ observe(); buildCheck(); }, 4000);
   window.addEventListener("hashchange", function(){
     var want = location.hash.replace(/^#/, "");
@@ -523,7 +631,7 @@
 
   observe();
   var want = location.hash.replace(/^#/, "");
-  activate(byId(want) ? want : (lsGet(K.tab) || APPS[0].id));
+  activate(byId(want) ? want : startId());
 
   if ("serviceWorker" in navigator && /^https?:$/.test(location.protocol)){
     window.addEventListener("load", function(){ navigator.serviceWorker.register("sw.js").catch(function(){}); });
